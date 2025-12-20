@@ -19,6 +19,7 @@
 #define BACKUP_DIR ".backups"
 #define DEBOUNCE_SECONDS 2
 #define GIT_INDEX_PATH ".git/index"
+#define GIT_HEAD_PATH ".git/HEAD"
 
 // Structure to track watch descriptors and paths
 typedef struct {
@@ -39,6 +40,27 @@ static int watch_count = 0;
 static DebounceEntry debounce_table[MAX_WATCHES];
 static int debounce_count = 0;
 static int git_index_wd = -1;  // Watch descriptor for .git/index
+static int git_head_wd = -1;   // Watch descriptor for .git/HEAD
+
+// Conflict tracking
+typedef struct {
+    char filepath[PATH_MAX];
+    int warned;
+} ConflictEntry;
+
+static ConflictEntry conflict_files[MAX_WATCHES];
+static int conflict_count = 0;
+
+// Activity tracking for heatmap
+typedef struct {
+    char filepath[PATH_MAX];
+    int change_count;
+    time_t first_seen;
+    time_t last_modified;
+} ActivityEntry;
+
+static ActivityEntry activity_log[MAX_WATCHES];
+static int activity_count = 0;
 
 // Allowed extensions to backup
 static const char *allowed_extensions[] = {
@@ -47,9 +69,18 @@ static const char *allowed_extensions[] = {
     ".yml", ".yaml", ".toml", ".ini", ".cfg", NULL
 };
 
+// Forward declarations
+void save_activity_log();
+void load_activity_log();
+void display_heatmap();
+
 // Cleanup handler
 void cleanup_handler(int signum) {
     printf("\nCleaning up and exiting...\n");
+    
+    // Save activity log before exit
+    save_activity_log();
+    
     if (inotify_fd >= 0) {
         for (int i = 0; i < watch_count; i++) {
             inotify_rm_watch(inotify_fd, watches[i].wd);
@@ -290,7 +321,7 @@ void delete_backups_for_file(const char *filename) {
     closedir(backup_root);
     
     if (deleted_count > 0) {
-        printf("🗑️  Deleted %d backup(s) for %s (committed to git)\n", 
+        printf("Deleted %d backup(s) for %s (committed to git)\n", 
                deleted_count, filename);
     }
 }
@@ -300,7 +331,7 @@ void handle_git_commit() {
     // Small delay to ensure commit is complete
     sleep(1);
     
-    printf("\n📝 Git commit detected! Cleaning up backups...\n");
+    printf("\nGit commit detected! Cleaning up backups...\n");
     
     char committed_files[256][PATH_MAX];
     int file_count = 0;
@@ -316,7 +347,7 @@ void handle_git_commit() {
         delete_backups_for_file(committed_files[i]);
     }
     
-    printf("✓ Backup cleanup complete!\n\n");
+    printf("Backup cleanup complete!\n\n");
 }
 
 // Setup git hooks for automatic cleanup
@@ -336,7 +367,7 @@ void setup_git_hooks() {
     fprintf(hook, "git diff-tree --no-commit-id --name-only -r HEAD | while read file; do\n");
     fprintf(hook, "  # Delete all backups for this file\n");
     fprintf(hook, "  find .backups -type f -name \"*_${file}\" -delete 2>/dev/null\n");
-    fprintf(hook, "  echo \"🗑️  Cleaned backups for: $file\"\n");
+    fprintf(hook, "  echo \"Cleaned backups for: $file\"\n");
     fprintf(hook, "done\n");
     
     fclose(hook);
@@ -344,7 +375,399 @@ void setup_git_hooks() {
     // Make it executable
     chmod(hook_path, 0755);
     
-    printf("✓ Git post-commit hook installed\n");
+    printf("Git post-commit hook installed\n");
+}
+
+// Get current git branch
+void get_current_branch(char *branch, size_t size) {
+    FILE *fp = popen("git branch --show-current 2>/dev/null", "r");
+    if (!fp) {
+        strncpy(branch, "unknown", size);
+        return;
+    }
+    
+    if (fgets(branch, size, fp)) {
+        branch[strcspn(branch, "\n")] = 0;
+    } else {
+        strncpy(branch, "unknown", size);
+    }
+    pclose(fp);
+}
+
+// Check if file has different content in another branch
+int check_file_differs_in_branch(const char *filepath, const char *target_branch) {
+    char cmd[PATH_MAX * 2];
+    snprintf(cmd, sizeof(cmd), 
+             "git diff --quiet HEAD %s -- %s 2>/dev/null", 
+             target_branch, filepath);
+    
+    int result = system(cmd);
+    // Returns 0 if no diff (same), 1 if different, >1 if error
+    return WEXITSTATUS(result) == 1;
+}
+
+// Get list of branches that have different versions of a file
+void get_divergent_branches(const char *filepath, char branches[][64], int *count, int max_branches) {
+    *count = 0;
+    
+    char current_branch[64];
+    get_current_branch(current_branch, sizeof(current_branch));
+    
+    FILE *fp = popen("git branch 2>/dev/null", "r");
+    if (!fp) return;
+    
+    char line[256];
+    while (fgets(line, sizeof(line), fp) && *count < max_branches) {
+        // Remove '* ' prefix and newline
+        char *branch_name = line;
+        if (line[0] == '*' && line[1] == ' ') {
+            branch_name = line + 2;
+        }
+        branch_name[strcspn(branch_name, "\n")] = 0;
+        
+        // Skip current branch and empty lines
+        if (strlen(branch_name) == 0 || strcmp(branch_name, current_branch) == 0) {
+            continue;
+        }
+        
+        // Check if file differs in this branch
+        if (check_file_differs_in_branch(filepath, branch_name)) {
+            strncpy(branches[*count], branch_name, 63);
+            branches[*count][63] = '\0';
+            (*count)++;
+        }
+    }
+    pclose(fp);
+}
+
+// Check if file is already marked as conflicted
+int is_conflict_warned(const char *filepath) {
+    for (int i = 0; i < conflict_count; i++) {
+        if (strcmp(conflict_files[i].filepath, filepath) == 0) {
+            return conflict_files[i].warned;
+        }
+    }
+    return 0;
+}
+
+// Mark file as warned
+void mark_conflict_warned(const char *filepath) {
+    for (int i = 0; i < conflict_count; i++) {
+        if (strcmp(conflict_files[i].filepath, filepath) == 0) {
+            conflict_files[i].warned = 1;
+            return;
+        }
+    }
+    
+    if (conflict_count < MAX_WATCHES) {
+        strncpy(conflict_files[conflict_count].filepath, filepath, PATH_MAX - 1);
+        conflict_files[conflict_count].warned = 1;
+        conflict_count++;
+    }
+}
+
+// Scan for potential merge conflicts
+void scan_for_potential_conflicts() {
+    conflict_count = 0; // Reset
+    
+    char current_branch[64];
+    get_current_branch(current_branch, sizeof(current_branch));
+    
+    if (strcmp(current_branch, "unknown") == 0) {
+        return; // Not in a git repo or detached HEAD
+    }
+    
+    // Get list of modified files
+    FILE *fp = popen("git ls-files -m 2>/dev/null", "r");
+    if (!fp) return;
+    
+    char filepath[PATH_MAX];
+    while (fgets(filepath, sizeof(filepath), fp)) {
+        filepath[strcspn(filepath, "\n")] = 0;
+        
+        char divergent_branches[32][64];
+        int branch_count = 0;
+        
+        get_divergent_branches(filepath, divergent_branches, &branch_count, 32);
+        
+        if (branch_count > 0 && conflict_count < MAX_WATCHES) {
+            strncpy(conflict_files[conflict_count].filepath, filepath, PATH_MAX - 1);
+            conflict_files[conflict_count].warned = 0;
+            conflict_count++;
+        }
+    }
+    pclose(fp);
+}
+
+// Warn about potential conflicts before editing
+void warn_potential_conflict(const char *filepath) {
+    if (is_conflict_warned(filepath)) {
+        return; // Already warned
+    }
+    
+    char divergent_branches[32][64];
+    int branch_count = 0;
+    
+    get_divergent_branches(filepath, divergent_branches, &branch_count, 32);
+    
+    if (branch_count > 0) {
+        printf("\nWARNING: POTENTIAL MERGE CONFLICT\n");
+        printf("========================================\n");
+        printf("File: %s\n", filepath);
+        printf("This file has different versions in:\n");
+        
+        for (int i = 0; i < branch_count && i < 5; i++) {
+            printf("  - %s\n", divergent_branches[i]);
+        }
+        
+        if (branch_count > 5) {
+            printf("  ... and %d more branch(es)\n", branch_count - 5);
+        }
+        
+        printf("\nEditing this file may cause conflicts when merging!\n");
+        printf("Consider: git pull/merge before continuing\n");
+        printf("========================================\n\n");
+        
+        mark_conflict_warned(filepath);
+    }
+}
+
+// Handle branch changes
+void handle_branch_change() {
+    printf("\nBranch change detected! Rescanning for conflicts...\n");
+    scan_for_potential_conflicts();
+    
+    if (conflict_count > 0) {
+        printf("WARNING: Found %d file(s) with potential conflicts:\n", conflict_count);
+        for (int i = 0; i < conflict_count && i < 10; i++) {
+            printf("  - %s\n", conflict_files[i].filepath);
+        }
+        if (conflict_count > 10) {
+            printf("  ... and %d more\n", conflict_count - 10);
+        }
+    } else {
+        printf("No potential conflicts detected\n");
+    }
+    printf("\n");
+}
+
+// Track file activity
+void track_file_activity(const char *filepath) {
+    time_t now = time(NULL);
+    
+    // Check if file already in activity log
+    for (int i = 0; i < activity_count; i++) {
+        if (strcmp(activity_log[i].filepath, filepath) == 0) {
+            activity_log[i].change_count++;
+            activity_log[i].last_modified = now;
+            return;
+        }
+    }
+    
+    // Add new entry
+    if (activity_count < MAX_WATCHES) {
+        strncpy(activity_log[activity_count].filepath, filepath, PATH_MAX - 1);
+        activity_log[activity_count].change_count = 1;
+        activity_log[activity_count].first_seen = now;
+        activity_log[activity_count].last_modified = now;
+        activity_count++;
+    }
+}
+
+// Compare function for sorting by change count
+int compare_activity(const void *a, const void *b) {
+    ActivityEntry *ea = (ActivityEntry *)a;
+    ActivityEntry *eb = (ActivityEntry *)b;
+    return eb->change_count - ea->change_count; // Descending order
+}
+
+// Generate heat bar for visualization
+void generate_heat_bar(int count, int max_count, char *bar, size_t bar_size) {
+    const char *blocks[] = {"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
+    int bar_length = 10;
+    int filled = (count * bar_length) / (max_count > 0 ? max_count : 1);
+    
+    bar[0] = '\0';
+    for (int i = 0; i < bar_length; i++) {
+        if (i < filled) {
+            strncat(bar, blocks[7], bar_size - strlen(bar) - 1); // Full block
+        } else {
+            strncat(bar, blocks[0], bar_size - strlen(bar) - 1); // Empty block
+        }
+    }
+}
+
+// Get heat level label
+const char* get_heat_label(int count, int max_count) {
+    float ratio = (float)count / (max_count > 0 ? max_count : 1);
+    
+    if (ratio > 0.7) return "HOT";
+    if (ratio > 0.4) return "WARM";
+    if (ratio > 0.1) return "COOL";
+    return "COLD";
+}
+
+// Calculate time difference in human-readable format
+void format_time_ago(time_t timestamp, char *buffer, size_t size) {
+    time_t now = time(NULL);
+    int diff = (int)difftime(now, timestamp);
+    
+    if (diff < 60) {
+        snprintf(buffer, size, "%ds ago", diff);
+    } else if (diff < 3600) {
+        snprintf(buffer, size, "%dm ago", diff / 60);
+    } else if (diff < 86400) {
+        snprintf(buffer, size, "%dh ago", diff / 3600);
+    } else {
+        snprintf(buffer, size, "%dd ago", diff / 86400);
+    }
+}
+
+// Display file activity heatmap
+void display_heatmap() {
+    if (activity_count == 0) {
+        printf("\nNo activity recorded yet\n\n");
+        return;
+    }
+    
+    // Sort by change count
+    ActivityEntry sorted[MAX_WATCHES];
+    memcpy(sorted, activity_log, sizeof(ActivityEntry) * activity_count);
+    qsort(sorted, activity_count, sizeof(ActivityEntry), compare_activity);
+    
+    // Find max count for scaling
+    int max_count = sorted[0].change_count;
+    
+    printf("\n");
+    printf("================================================================================\n");
+    printf("                          FILE ACTIVITY HEATMAP                                 \n");
+    printf("================================================================================\n\n");
+    
+    printf("Total files tracked: %d\n", activity_count);
+    printf("Most active file: %s (%d changes)\n\n", sorted[0].filepath, sorted[0].change_count);
+    
+    printf("--------------------------------------------------------------------------------\n");
+    printf(" File                          Activity    Changes   Last Edit                 \n");
+    printf("--------------------------------------------------------------------------------\n");
+    
+    // Display top files (up to 20)
+    int display_count = activity_count < 20 ? activity_count : 20;
+    
+    for (int i = 0; i < display_count; i++) {
+        char bar[128];
+        char time_str[32];
+        
+        generate_heat_bar(sorted[i].change_count, max_count, bar, sizeof(bar));
+        format_time_ago(sorted[i].last_modified, time_str, sizeof(time_str));
+        
+        // Truncate filename if too long
+        char display_name[35];
+        if (strlen(sorted[i].filepath) > 30) {
+            snprintf(display_name, sizeof(display_name), "...%s", 
+                     sorted[i].filepath + strlen(sorted[i].filepath) - 27);
+        } else {
+            strncpy(display_name, sorted[i].filepath, sizeof(display_name) - 1);
+            display_name[34] = '\0';
+        }
+        
+        printf(" %-30s %s  %3d      %-12s\n",
+               display_name,
+               bar,
+               sorted[i].change_count,
+               time_str);
+    }
+    
+    printf("--------------------------------------------------------------------------------\n");
+    
+    if (activity_count > 20) {
+        printf("  ... and %d more file(s)\n", activity_count - 20);
+    }
+    
+    // Statistics
+    printf("\nStatistics:\n");
+    
+    int total_changes = 0;
+    for (int i = 0; i < activity_count; i++) {
+        total_changes += activity_log[i].change_count;
+    }
+    
+    printf("  - Total changes: %d\n", total_changes);
+    printf("  - Average per file: %.1f\n", (float)total_changes / activity_count);
+    
+    // Heat levels distribution
+    int hot = 0, warm = 0, cool = 0, cold = 0;
+    for (int i = 0; i < activity_count; i++) {
+        float ratio = (float)activity_log[i].change_count / max_count;
+        if (ratio > 0.7) hot++;
+        else if (ratio > 0.4) warm++;
+        else if (ratio > 0.1) cool++;
+        else cold++;
+    }
+    
+    printf("\nHeat Distribution:\n");
+    printf("  [HOT]   %d file(s) - >70%% activity\n", hot);
+    printf("  [WARM]  %d file(s) - 40-70%% activity\n", warm);
+    printf("  [COOL]  %d file(s) - 10-40%% activity\n", cool);
+    printf("  [COLD]  %d file(s) - <10%% activity\n", cold);
+    
+    printf("\nNote: Hot files may need refactoring or better testing\n\n");
+}
+
+// Save activity log to file
+void save_activity_log() {
+    char log_path[PATH_MAX];
+    snprintf(log_path, sizeof(log_path), "%s/activity.log", BACKUP_DIR);
+    
+    FILE *f = fopen(log_path, "w");
+    if (!f) return;
+    
+    fprintf(f, "# LSSA Activity Log\n");
+    fprintf(f, "# Format: filepath,change_count,first_seen,last_modified\n");
+    
+    for (int i = 0; i < activity_count; i++) {
+        fprintf(f, "%s,%d,%ld,%ld\n",
+                activity_log[i].filepath,
+                activity_log[i].change_count,
+                activity_log[i].first_seen,
+                activity_log[i].last_modified);
+    }
+    
+    fclose(f);
+}
+
+// Load activity log from file
+void load_activity_log() {
+    char log_path[PATH_MAX];
+    snprintf(log_path, sizeof(log_path), "%s/activity.log", BACKUP_DIR);
+    
+    FILE *f = fopen(log_path, "r");
+    if (!f) return;
+    
+    char line[PATH_MAX + 128];
+    activity_count = 0;
+    
+    while (fgets(line, sizeof(line), f) && activity_count < MAX_WATCHES) {
+        if (line[0] == '#') continue; // Skip comments
+        
+        char filepath[PATH_MAX];
+        int change_count;
+        long first_seen, last_modified;
+        
+        if (sscanf(line, "%[^,],%d,%ld,%ld", 
+                   filepath, &change_count, &first_seen, &last_modified) == 4) {
+            strncpy(activity_log[activity_count].filepath, filepath, PATH_MAX - 1);
+            activity_log[activity_count].change_count = change_count;
+            activity_log[activity_count].first_seen = (time_t)first_seen;
+            activity_log[activity_count].last_modified = (time_t)last_modified;
+            activity_count++;
+        }
+    }
+    
+    fclose(f);
+    
+    if (activity_count > 0) {
+        printf("Loaded %d file(s) from activity log\n", activity_count);
+    }
 }
 
 // Safe file copy using fork/exec (no shell injection)
@@ -382,6 +805,9 @@ void backup_file(const char *filepath, const char *full_path) {
     // Check allowed extensions
     if (!is_allowed_extension(filepath)) return;
     
+    // ⚠️ WARN ABOUT POTENTIAL CONFLICTS BEFORE BACKING UP
+    warn_potential_conflict(filepath);
+    
     // Check debounce
     if (!check_debounce(full_path)) {
         return; // Too soon since last backup
@@ -397,9 +823,12 @@ void backup_file(const char *filepath, const char *full_path) {
     ensure_backup_dir(filepath, backup_path, sizeof(backup_path));
     
     if (safe_copy_file(full_path, backup_path) == 0) {
-        printf("✓ Backed up: %s -> %s\n", filepath, backup_path);
+        printf("Backed up: %s -> %s\n", filepath, backup_path);
+        
+        // Track activity for heatmap
+        track_file_activity(filepath);
     } else {
-        fprintf(stderr, "✗ Failed to backup: %s\n", filepath);
+        fprintf(stderr, "Failed to backup: %s\n", filepath);
     }
 }
 
@@ -458,6 +887,14 @@ const char* get_watch_path(int wd) {
 int main(int argc, char *argv[]) {
     char buffer[BUF_LEN];
     
+    // Check for stats command
+    if (argc > 1 && strcmp(argv[1], "stats") == 0) {
+        // Load activity log and display heatmap
+        load_activity_log();
+        display_heatmap();
+        return 0;
+    }
+    
     // Setup signal handlers
     signal(SIGINT, cleanup_handler);
     signal(SIGTERM, cleanup_handler);
@@ -468,6 +905,9 @@ int main(int argc, char *argv[]) {
         perror("inotify_init");
         return 1;
     }
+    
+    // Load previous activity log
+    load_activity_log();
     
     // Start watching current directory
     const char *watch_path = (argc > 1) ? argv[1] : ".";
@@ -482,8 +922,25 @@ int main(int argc, char *argv[]) {
     if (stat(GIT_INDEX_PATH, &st) == 0) {
         git_index_wd = inotify_add_watch(inotify_fd, GIT_INDEX_PATH, IN_MODIFY);
         if (git_index_wd >= 0) {
-            printf("📊 Watching git index for commits\n");
+            printf("Watching git index for commits\n");
         }
+    }
+    
+    // Watch .git/HEAD for branch changes
+    if (stat(GIT_HEAD_PATH, &st) == 0) {
+        git_head_wd = inotify_add_watch(inotify_fd, GIT_HEAD_PATH, IN_MODIFY);
+        if (git_head_wd >= 0) {
+            printf("Watching git HEAD for branch changes\n");
+        }
+    }
+    
+    // Initial scan for potential conflicts
+    printf("Scanning for potential merge conflicts...\n");
+    scan_for_potential_conflicts();
+    if (conflict_count > 0) {
+        printf("WARNING: Found %d file(s) with potential conflicts\n", conflict_count);
+    } else {
+        printf("No potential conflicts detected\n");
     }
     
     // Setup git hooks
@@ -508,16 +965,18 @@ int main(int argc, char *argv[]) {
         
         if (!has_backups) {
             fprintf(gitignore, "\n# LSSA Backup System\n.backups/\n");
-            printf("✓ Added .backups/ to .gitignore\n");
+            printf("Added .backups/ to .gitignore\n");
         }
         fclose(gitignore);
     }
     
-    printf("\n🔍 Git Backup System Active\n");
-    printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    printf("\nLSSA Git Backup System Active\n");
+    printf("================================\n");
     printf("Backups stored in: %s/\n", BACKUP_DIR);
     printf("Debounce: %d seconds\n", DEBOUNCE_SECONDS);
-    printf("Press Ctrl+C to stop\n\n");
+    printf("Activity tracking: enabled\n");
+    printf("Press Ctrl+C to stop\n");
+    printf("\nTip: Run './lssa stats' to see file activity heatmap\n\n");
     
     // Main event loop
     while (1) {
@@ -534,6 +993,13 @@ int main(int argc, char *argv[]) {
             // Check if this is the git index being modified (commit happened)
             if (event->wd == git_index_wd && (event->mask & IN_MODIFY)) {
                 handle_git_commit();
+                i += EVENT_SIZE + event->len;
+                continue;
+            }
+            
+            // Check if HEAD changed (branch switch)
+            if (event->wd == git_head_wd && (event->mask & IN_MODIFY)) {
+                handle_branch_change();
                 i += EVENT_SIZE + event->len;
                 continue;
             }
