@@ -18,6 +18,7 @@
 #define MAX_WATCHES 1024
 #define BACKUP_DIR ".backups"
 #define DEBOUNCE_SECONDS 2
+#define GIT_INDEX_PATH ".git/index"
 
 // Structure to track watch descriptors and paths
 typedef struct {
@@ -37,6 +38,7 @@ static WatchEntry watches[MAX_WATCHES];
 static int watch_count = 0;
 static DebounceEntry debounce_table[MAX_WATCHES];
 static int debounce_count = 0;
+static int git_index_wd = -1;  // Watch descriptor for .git/index
 
 // Allowed extensions to backup
 static const char *allowed_extensions[] = {
@@ -233,6 +235,86 @@ int check_debounce(const char *filepath) {
     return 1;
 }
 
+// Get list of committed files from git
+void get_committed_files(char files[][PATH_MAX], int *count, int max_files) {
+    *count = 0;
+    FILE *fp = popen("git diff --cached --name-only 2>/dev/null", "r");
+    if (!fp) return;
+    
+    char line[PATH_MAX];
+    while (fgets(line, sizeof(line), fp) && *count < max_files) {
+        // Remove newline
+        line[strcspn(line, "\n")] = 0;
+        if (strlen(line) > 0) {
+            strncpy(files[*count], line, PATH_MAX - 1);
+            (*count)++;
+        }
+    }
+    pclose(fp);
+}
+
+// Delete all backups for a specific file
+void delete_backups_for_file(const char *filename) {
+    DIR *backup_root = opendir(BACKUP_DIR);
+    if (!backup_root) return;
+    
+    struct dirent *date_entry;
+    int deleted_count = 0;
+    
+    // Iterate through date directories
+    while ((date_entry = readdir(backup_root)) != NULL) {
+        if (date_entry->d_name[0] == '.') continue;
+        
+        char date_path[PATH_MAX];
+        snprintf(date_path, sizeof(date_path), "%s/%s", BACKUP_DIR, date_entry->d_name);
+        
+        DIR *date_dir = opendir(date_path);
+        if (!date_dir) continue;
+        
+        struct dirent *file_entry;
+        while ((file_entry = readdir(date_dir)) != NULL) {
+            // Check if this backup is for our file
+            if (strstr(file_entry->d_name, filename) != NULL) {
+                char backup_file[PATH_MAX];
+                snprintf(backup_file, sizeof(backup_file), "%s/%s", 
+                         date_path, file_entry->d_name);
+                
+                if (unlink(backup_file) == 0) {
+                    deleted_count++;
+                }
+            }
+        }
+        closedir(date_dir);
+    }
+    closedir(backup_root);
+    
+    if (deleted_count > 0) {
+        printf("🗑️  Deleted %d backup(s) for %s (committed to git)\n", 
+               deleted_count, filename);
+    }
+}
+
+// Handle git commit - cleanup backups for committed files
+void handle_git_commit() {
+    printf("\n📝 Git commit detected! Cleaning up backups...\n");
+    
+    char committed_files[256][PATH_MAX];
+    int file_count = 0;
+    
+    get_committed_files(committed_files, &file_count, 256);
+    
+    if (file_count == 0) {
+        printf("No staged files found.\n");
+        return;
+    }
+    
+    for (int i = 0; i < file_count; i++) {
+        delete_backups_for_file(committed_files[i]);
+    }
+    
+    printf("✓ Backup cleanup complete!\n\n");
+}
+
 // Safe file copy using fork/exec (no shell injection)
 int safe_copy_file(const char *src, const char *dst) {
     pid_t pid = fork();
@@ -363,6 +445,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     
+    // Watch .git/index for commits
+    struct stat st;
+    if (stat(GIT_INDEX_PATH, &st) == 0) {
+        git_index_wd = inotify_add_watch(inotify_fd, GIT_INDEX_PATH, IN_MODIFY);
+        if (git_index_wd >= 0) {
+            printf("📊 Watching git index for commits\n");
+        }
+    }
+    
     printf("\n🔍 Git Backup System Active\n");
     printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     printf("Backups stored in: %s/\n", BACKUP_DIR);
@@ -380,6 +471,13 @@ int main(int argc, char *argv[]) {
         int i = 0;
         while (i < length) {
             struct inotify_event *event = (struct inotify_event *)&buffer[i];
+            
+            // Check if this is the git index being modified (commit happened)
+            if (event->wd == git_index_wd && (event->mask & IN_MODIFY)) {
+                handle_git_commit();
+                i += EVENT_SIZE + event->len;
+                continue;
+            }
             
             if (event->len) {
                 const char *watch_path = get_watch_path(event->wd);
