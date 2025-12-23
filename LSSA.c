@@ -1009,8 +1009,25 @@ int main(int argc, char *argv[]) {
         }
         
         if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
-            printf("\nLSSA - Live Source Snapshot & Analysis\n");
-            printf("======================================\n\n");
+            printf("\n");
+            printf("                 ___________________\n");
+            printf("                /                   \\\n");
+            printf("               /    L S S A          \\\n");
+            printf("              /_______________________\\\n");
+            printf("              |  |  |  |  |  |  |  |  |\n");
+            printf("              |  |  |  |  |  |  |  |  |\n");
+            printf("              |  |  |  |  |  |  |  |  |\n");
+            printf("             _|__|__|__|__|__|__|__|__|_\n");
+            printf("            |___________________________|\n");
+            printf("            |                           |\n");
+            printf("            |___________________________|\n\n");
+            printf("          Guardian of Source History\n");
+            printf("     \"Like Elissa founded Carthage, we preserve your code\"\n");
+            printf("================================================================\n\n");
+            printf("ELISSA - Evolving Live Incremental Source Snapshot Archive\n\n");
+            printf("Named after Elissa (Dido), legendary founder of Carthage,\n");
+            printf("who built an enduring legacy. ELISSA preserves your code\n");
+            printf("history, building an archive that protects your work.\n\n");
             printf("Usage:\n");
             printf("  ./lssa           Start backup system (watch mode)\n");
             printf("  ./lssa -s        Show file activity heatmap (stats)\n");
@@ -1023,6 +1040,10 @@ int main(int argc, char *argv[]) {
             printf("  - Git integration (cleanup on commit)\n");
             printf("  - Conflict prediction across branches\n");
             printf("  - Activity tracking and heatmap visualization\n\n");
+            printf("Philosophy:\n");
+            printf("  Just as Elissa wisely preserved her people and founded\n");
+            printf("  a great city, ELISSA guards your source code, ensuring\n");
+            printf("  no work is lost and every change is preserved.\n\n");
             return 0;
         }
     }
@@ -1107,13 +1128,26 @@ int main(int argc, char *argv[]) {
         fclose(gitignore);
     }
     
-    printf("\nLSSA Git Backup System Active\n");
-    printf("================================\n");
+    printf("\n");
+    printf("              ___________________\n");
+    printf("             /                   \\\n");
+    printf("            /     E L I S S A     \\\n");
+    printf("           /_______________________\\\n");
+    printf("           |  |  |  |  |  |  |  |  |\n");
+    printf("           |  |  |  |  |  |  |  |  |\n");
+    printf("           |  |  |  |  |  |  |  |  |\n");
+    printf("          _|__|__|__|__|__|__|__|__|_\n");
+    printf("         |___________________________|\n");
+    printf("         |                           |\n");
+    printf("         |___________________________|\n\n");
+    printf("       Guardian of Source History\n");
+    printf("       Now watching your code...\n");
+    printf("======================================\n\n");
     printf("Backups stored in: %s/\n", BACKUP_DIR);
     printf("Debounce: %d seconds\n", DEBOUNCE_SECONDS);
     printf("Activity tracking: enabled\n");
     printf("Press Ctrl+C to stop\n");
-    printf("\nTip: Run './lssa stats' to see file activity heatmap\n\n");
+    printf("\nTip: Run './lssa -h' for help\n\n");
     
     // Main event loop
     int event_counter = 0;
