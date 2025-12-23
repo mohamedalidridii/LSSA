@@ -887,12 +887,73 @@ const char* get_watch_path(int wd) {
 int main(int argc, char *argv[]) {
     char buffer[BUF_LEN];
     
-    // Check for stats command
-    if (argc > 1 && strcmp(argv[1], "stats") == 0) {
-        // Load activity log and display heatmap
-        load_activity_log();
-        display_heatmap();
-        return 0;
+    // Check for command-line flags
+    if (argc > 1) {
+        if (strcmp(argv[1], "-s") == 0 || strcmp(argv[1], "stats") == 0) {
+            // Load activity log and display heatmap
+            load_activity_log();
+            display_heatmap();
+            return 0;
+        }
+        
+        if (strcmp(argv[1], "-c") == 0) {
+            // Check for potential conflicts
+            printf("\nChecking for potential merge conflicts...\n");
+            printf("==========================================\n\n");
+            
+            scan_for_potential_conflicts();
+            
+            if (conflict_count == 0) {
+                printf("SUCCESS: No potential conflicts detected!\n");
+                printf("All files are safe to edit.\n\n");
+                return 0;
+            }
+            
+            printf("WARNING: Found %d file(s) with potential conflicts:\n\n", conflict_count);
+            
+            // Show each conflicted file with its divergent branches
+            for (int i = 0; i < conflict_count; i++) {
+                char divergent_branches[32][64];
+                int branch_count = 0;
+                
+                get_divergent_branches(conflict_files[i].filepath, 
+                                     divergent_branches, &branch_count, 32);
+                
+                printf("  [%d] %s\n", i + 1, conflict_files[i].filepath);
+                printf("      Differs in branches:\n");
+                
+                for (int j = 0; j < branch_count && j < 10; j++) {
+                    printf("        - %s\n", divergent_branches[j]);
+                }
+                
+                if (branch_count > 10) {
+                    printf("        ... and %d more\n", branch_count - 10);
+                }
+                printf("\n");
+            }
+            
+            printf("Recommendation: Consider merging or pulling these branches\n");
+            printf("before editing the listed files to avoid conflicts.\n\n");
+            return 0;
+        }
+        
+        if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+            printf("\nLSSA - Live Source Snapshot & Analysis\n");
+            printf("======================================\n\n");
+            printf("Usage:\n");
+            printf("  ./lssa           Start backup system (watch mode)\n");
+            printf("  ./lssa -s        Show file activity heatmap (stats)\n");
+            printf("  ./lssa -c        Check for potential merge conflicts\n");
+            printf("  ./lssa -h        Show this help message\n");
+            printf("  ./lssa <path>    Watch specific directory\n\n");
+            printf("Features:\n");
+            printf("  - Automatic file backup on every modification\n");
+            printf("  - Smart deduplication (skip unchanged files)\n");
+            printf("  - Git integration (cleanup on commit)\n");
+            printf("  - Conflict prediction across branches\n");
+            printf("  - Activity tracking and heatmap visualization\n\n");
+            return 0;
+        }
     }
     
     // Setup signal handlers
@@ -979,6 +1040,7 @@ int main(int argc, char *argv[]) {
     printf("\nTip: Run './lssa stats' to see file activity heatmap\n\n");
     
     // Main event loop
+    int event_counter = 0;
     while (1) {
         int length = read(inotify_fd, buffer, BUF_LEN);
         if (length < 0) {
@@ -1025,6 +1087,13 @@ int main(int argc, char *argv[]) {
             }
             
             i += EVENT_SIZE + event->len;
+        }
+        
+        // Auto-save activity log every 10 events
+        event_counter++;
+        if (event_counter >= 10) {
+            save_activity_log();
+            event_counter = 0;
         }
     }
     
