@@ -1012,14 +1012,14 @@ int main(int argc, char *argv[]) {
             printf("\n");
             printf("                 ___________________\n");
             printf("                /                   \\\n");
-            printf("               /    L S S A          \\\n");
+            printf("               /    L S S A  v1.0    \\\n");
             printf("              /_______________________\\\n");
             printf("              |  |  |  |  |  |  |  |  |\n");
             printf("              |  |  |  |  |  |  |  |  |\n");
             printf("              |  |  |  |  |  |  |  |  |\n");
             printf("             _|__|__|__|__|__|__|__|__|_\n");
             printf("            |___________________________|\n");
-            printf("            |                           |\n");
+            printf("            |      by medaly.dridi      |\n");
             printf("            |___________________________|\n\n");
             printf("          Guardian of Source History\n");
             printf("     \"Like Elissa founded Carthage, we preserve your code\"\n");
