@@ -887,7 +887,7 @@ const char* get_watch_path(int wd) {
 int main(int argc, char *argv[]) {
     char buffer[BUF_LEN];
     
-    // Check for command-line flags
+    // Check for command-line flags FIRST (before any initialization)
     if (argc > 1) {
         if (strcmp(argv[1], "-s") == 0 || strcmp(argv[1], "stats") == 0) {
             // Load activity log and display heatmap
@@ -901,39 +901,110 @@ int main(int argc, char *argv[]) {
             printf("\nChecking for potential merge conflicts...\n");
             printf("==========================================\n\n");
             
-            scan_for_potential_conflicts();
+            // Check if we're in a git repository
+            struct stat st;
+            if (stat(".git", &st) != 0) {
+                printf("ERROR: Not in a git repository!\n");
+                printf("Run this command from the root of a git project.\n\n");
+                return 1;
+            }
             
-            if (conflict_count == 0) {
-                printf("SUCCESS: No potential conflicts detected!\n");
-                printf("All files are safe to edit.\n\n");
+            // Get current branch
+            char current_branch[64];
+            get_current_branch(current_branch, sizeof(current_branch));
+            printf("Current branch: %s\n\n", current_branch);
+            
+            // Get all branches
+            FILE *fp = popen("git branch 2>/dev/null", "r");
+            if (!fp) {
+                printf("ERROR: Failed to get branch list\n");
+                return 1;
+            }
+            
+            char all_branches[100][64];
+            int total_branches = 0;
+            char line[256];
+            
+            while (fgets(line, sizeof(line), fp) && total_branches < 100) {
+                char *branch_name = line;
+                if (line[0] == '*' && line[1] == ' ') {
+                    branch_name = line + 2;
+                }
+                branch_name[strcspn(branch_name, "\n")] = 0;
+                
+                if (strlen(branch_name) > 0 && strcmp(branch_name, current_branch) != 0) {
+                    strncpy(all_branches[total_branches], branch_name, 63);
+                    all_branches[total_branches][63] = '\0';
+                    total_branches++;
+                }
+            }
+            pclose(fp);
+            
+            if (total_branches == 0) {
+                printf("No other branches found.\n\n");
                 return 0;
             }
             
-            printf("WARNING: Found %d file(s) with potential conflicts:\n\n", conflict_count);
+            printf("Analyzing %d other branch(es)...\n\n", total_branches);
             
-            // Show each conflicted file with its divergent branches
-            for (int i = 0; i < conflict_count; i++) {
-                char divergent_branches[32][64];
-                int branch_count = 0;
+            int found_conflicts = 0;
+            
+            // For each branch, find conflicting files
+            for (int b = 0; b < total_branches; b++) {
+                char *branch = all_branches[b];
                 
-                get_divergent_branches(conflict_files[i].filepath, 
-                                     divergent_branches, &branch_count, 32);
+                // Get list of files that differ in this branch
+                char cmd[512];
+                snprintf(cmd, sizeof(cmd), 
+                         "git diff --name-only HEAD %s 2>/dev/null", branch);
                 
-                printf("  [%d] %s\n", i + 1, conflict_files[i].filepath);
-                printf("      Differs in branches:\n");
+                FILE *diff_fp = popen(cmd, "r");
+                if (!diff_fp) continue;
                 
-                for (int j = 0; j < branch_count && j < 10; j++) {
-                    printf("        - %s\n", divergent_branches[j]);
+                char conflicting_files[200][PATH_MAX];
+                int file_count = 0;
+                
+                while (fgets(line, sizeof(line), diff_fp) && file_count < 200) {
+                    line[strcspn(line, "\n")] = 0;
+                    if (strlen(line) > 0) {
+                        strncpy(conflicting_files[file_count], line, PATH_MAX - 1);
+                        file_count++;
+                    }
                 }
+                pclose(diff_fp);
                 
-                if (branch_count > 10) {
-                    printf("        ... and %d more\n", branch_count - 10);
+                if (file_count > 0) {
+                    found_conflicts = 1;
+                    printf("Branch: %s\n", branch);
+                    printf("----------------------------------------\n");
+                    printf("Files that differ: %d\n\n", file_count);
+                    
+                    // Show up to 20 files per branch
+                    int display_count = file_count < 20 ? file_count : 20;
+                    for (int i = 0; i < display_count; i++) {
+                        printf("  [%d] %s\n", i + 1, conflicting_files[i]);
+                    }
+                    
+                    if (file_count > 20) {
+                        printf("  ... and %d more file(s)\n", file_count - 20);
+                    }
+                    
+                    printf("\n");
                 }
-                printf("\n");
             }
             
-            printf("Recommendation: Consider merging or pulling these branches\n");
-            printf("before editing the listed files to avoid conflicts.\n\n");
+            if (!found_conflicts) {
+                printf("SUCCESS: No conflicts found!\n");
+                printf("All branches are in sync with current branch.\n\n");
+            } else {
+                printf("\n");
+                printf("Summary\n");
+                printf("========================================\n");
+                printf("WARNING: Files differ across branches.\n");
+                printf("Editing these files may cause merge conflicts.\n");
+                printf("Consider merging or rebasing before making changes.\n\n");
+            }
+            
             return 0;
         }
         
@@ -956,6 +1027,7 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    // Only NOW initialize inotify for watch mode
     // Setup signal handlers
     signal(SIGINT, cleanup_handler);
     signal(SIGTERM, cleanup_handler);
@@ -970,8 +1042,12 @@ int main(int argc, char *argv[]) {
     // Load previous activity log
     load_activity_log();
     
-    // Start watching current directory
-    const char *watch_path = (argc > 1) ? argv[1] : ".";
+    // Determine watch path
+    const char *watch_path = ".";
+    if (argc > 1 && argv[1][0] != '-') {
+        // If argument doesn't start with '-', treat it as a path
+        watch_path = argv[1];
+    }
     
     if (add_watch_recursive(watch_path) < 0) {
         fprintf(stderr, "Failed to setup watches\n");
