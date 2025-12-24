@@ -40,3 +40,5 @@ lssa -h	Help:   Displays usage information and flags.
 
 ## License
 MIT License
+
+Developed by mohamedalidridii AKA medaly.dridi
