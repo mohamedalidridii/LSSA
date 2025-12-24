@@ -1,0 +1,27 @@
+.TH LSSA 1 "December 2024" "LSSA 1.0.0" "User Commands"
+.SH NAME
+lssa \- Live Source Sync Assistant
+.SH SYNOPSIS
+.B lssa
+[\fIDIRECTORY\fR]
+.br
+.B lssa stats
+.SH DESCRIPTION
+LSSA is an intelligent backup system that monitors file changes in real-time
+and integrates with git to manage backups automatically.
+.SH OPTIONS
+.TP
+.B [DIRECTORY]
+Watch specified directory (default: current directory)
+.TP
+.B stats
+Display file activity heatmap
+.SH EXAMPLES
+.TP
+Start monitoring:
+.B lssa
+.TP
+View activity heatmap:
+.B lssa stats
+.SH AUTHOR
+LSSA Development Team
