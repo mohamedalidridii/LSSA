@@ -1,4 +1,4 @@
-# LSSA - Live Source Sync Assistant
+# LSSA - Local Source Storage Assistant
 
 Intelligent backup system with real-time file monitoring and git integration.
 
@@ -11,61 +11,32 @@ Intelligent backup system with real-time file monitoring and git integration.
 - File activity heatmap
 - Debouncing to prevent backup spam
 
-## Quick Start
-
-```bash
-# Build
-make
 
 # Install system-wide
-sudo make install
+Debian and Arch Linux.
 
-# Run
-lssa
+# Step 1: Clone the Repository
 
-# View statistics
-lssa stats
-```
-
-## Installation
-
-### From Source (All Systems)
 ```bash
 git clone https://github.com/yourusername/lssa
-cd lssa
-make
-sudo make install
+cd LSSA
 ```
 
-### Arch Linux
-```bash
-yay -S lssa
-```
-
-### Debian/Ubuntu
-```bash
-sudo dpkg -i lssa_1.0.0_amd64.deb
-```
-
-## Usage
+# Step 2: Run the Automated Installer
 
 ```bash
-# Start monitoring current directory
-lssa
-
-# Monitor specific directory
-lssa /path/to/project
-
-# View file activity heatmap
-lssa stats
+chmod +x setup-lssa.sh
+./setup-lssa.sh
 ```
 
-## Uninstall
+## Usage & Commands
+You can run lssa from the root of any project directory.
+Command	        Action
+lssa	        Monitor Mode: Starts the background process to watch and backup files.
+lssa stats, -s	Analytics: Displays the File Activity Heatmap and modification stats.
+lssa -c	        Conflict Scan: Deep-scans all Git branches for divergent files.
+lssa -h	Help:   Displays usage information and flags.
 
-```bash
-sudo make uninstall
-```
 
 ## License
-
 MIT License
