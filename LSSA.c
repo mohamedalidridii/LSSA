@@ -1029,11 +1029,11 @@ int main(int argc, char *argv[]) {
             printf("who built an enduring legacy. ELISSA preserves your code\n");
             printf("history, building an archive that protects your work.\n\n");
             printf("Usage:\n");
-            printf("  ./lssa           Start backup system (watch mode)\n");
-            printf("  ./lssa -s        Show file activity heatmap (stats)\n");
-            printf("  ./lssa -c        Check for potential merge conflicts\n");
-            printf("  ./lssa -h        Show this help message\n");
-            printf("  ./lssa <path>    Watch specific directory\n\n");
+            printf("  lssa           Start backup system (watch mode)\n");
+            printf("  lssa -s        Show file activity heatmap (stats)\n");
+            printf("  lssa -c        Check for potential merge conflicts\n");
+            printf("  lssa -h        Show this help message\n");
+            printf("  lssa <path>    Watch specific directory\n\n");
             printf("Features:\n");
             printf("  - Automatic file backup on every modification\n");
             printf("  - Smart deduplication (skip unchanged files)\n");
