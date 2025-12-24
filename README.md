@@ -18,7 +18,7 @@ Debian and Arch Linux.
 # Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/lssa
+git clone https://github.com/mohamedalidridii/lssa
 cd LSSA
 ```
 
